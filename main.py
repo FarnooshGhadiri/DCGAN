@@ -121,6 +121,42 @@ print(netG)
 class Discriminator(nn.Module):
     def __init__(self,ngpu):
         super(Discriminator,self).__init__()
+        self.ngpu = ngpu
+        # input is (nc) x 64 x 64
+        self.encode1 = nn.Sequential(nn.Conv2d(nc,ndf,4,2,1,bias=False),nn.LeakyReLU(0.2,inplace=True))
+        # state size. (ndf) x 32 x 32
+        self.encode2 = self._make_layer_encode(ndf,ndf*2,2,1)
+        # state size. (ndf*2) x 16 x 16
+        self.encode3 = self._make_layer_encode(ndf*2,ndf*4,2,1)
+        # state size. (ndf*4) x 8 x 8
+        self.encode4 = self._make_layer_encode(ndf * 4, ndf*8, 2, 1)
+        # state size. (ndf*8) x 4x 4
+        self.encode5 = nn.Sequential(nn.Conv2d(ndf*8,1,4,1,0,bias=False),nn.Sigmoid())
+
+    def forward(self,input):
+        feature_1 = self.encode1(input)
+        feature_2 = self.encode2(feature_1)
+        feature_3 = self.encode3(feature_2)
+        feature_4 = self.encode4(feature_3)
+        feature_5 = self.encode5(feature_4)
+
+
+    def _make_layer_encode(self,in_nc,out_nc,stride_nm,Padd_nm):
+        block =[nn.Conv2d(in_nc,out_nc,4,stride_nm,Padd_nm,bias=False),
+                nn.BatchNorm2d(out_nc),
+                nn.LeakyReLU(True)]
+        return nn.Sequential(*block)
+
+NetD = Discriminator(ngpu).to(device)
+if (device.type=='cuda') and (ngpu>0):
+    NetD = nn.DataParallel(NetD,list(range(ngpu)))
+
+NetD.apply(Weight_init)
+
+    # Print the model
+print(NetD)
+
+
 
 
 
