@@ -10,6 +10,8 @@ import matplotlib.animation as animation
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+from spectral_normalization import SpectralNorm
+
 import torchvision.utils as vutils
 from PIL import Image
 # root directory for dataset
@@ -93,6 +95,7 @@ class Generator(nn.Module):
         feature_2 = self.de_conv2(feature_1)
         feature_3 = self.de_conv3(feature_2)
         feature_4 = self.de_conv3(feature_3)
+        return feature_4
 
 
     def _make_layer_decode(self,in_nc,out_nc,strid_nm,Padd_nm):
@@ -103,42 +106,57 @@ class Generator(nn.Module):
 
 
 # Create the generator
-netG = Generator(ngpu).to(device)
+NetG = Generator(ngpu).to(device)
 
 # Handle multi-gpu if desired
 if (device.type == 'cuda') and (ngpu > 1):
-    netG = nn.DataParallel(netG, list(range(ngpu)))
+    NetG = nn.DataParallel(NetG, list(range(ngpu)))
 
 # Apply the weights_init function to randomly initialize all weights
 #  to mean=0, stdev=0.2.
-netG.apply(Weight_init)
+NetG.apply(Weight_init)
 
 # Print the model
-print(netG)
+print(NetG)
 
 
 # Define Discriminator Class
 class Discriminator(nn.Module):
-    def __init__(self,ngpu):
+    def __init__(self,ngpu,Norm_pm):
         super(Discriminator,self).__init__()
+        self.Norm_pm = Norm_pm
         self.ngpu = ngpu
         # input is (nc) x 64 x 64
-        self.encode1 = nn.Sequential(nn.Conv2d(nc,ndf,4,2,1,bias=False),nn.LeakyReLU(0.2,inplace=True))
-        # state size. (ndf) x 32 x 32
-        self.encode2 = self._make_layer_encode(ndf,ndf*2,2,1)
-        # state size. (ndf*2) x 16 x 16
-        self.encode3 = self._make_layer_encode(ndf*2,ndf*4,2,1)
-        # state size. (ndf*4) x 8 x 8
-        self.encode4 = self._make_layer_encode(ndf * 4, ndf*8, 2, 1)
-        # state size. (ndf*8) x 4x 4
-        self.encode5 = nn.Sequential(nn.Conv2d(ndf*8,1,4,1,0,bias=False),nn.Sigmoid())
+        if Norm_pm =='BatchNorm':
+          self.encode1 = nn.Sequential(nn.Conv2d(nc,ndf,4,2,1,bias=False),nn.LeakyReLU(0.2,inplace=True))
+          # state size. (ndf) x 32 x 32
+          self.encode2 = self._make_layer_encode(ndf,ndf*2,2,1)
+          # state size. (ndf*2) x 16 x 16
+          self.encode3 = self._make_layer_encode(ndf*2,ndf*4,2,1)
+          # state size. (ndf*4) x 8 x 8
+          self.encode4 = self._make_layer_encode(ndf * 4, ndf*8, 2, 1)
+          # state size. (ndf*8) x 4x 4
+          self.encode5 = nn.Sequential(nn.Conv2d(ndf*8,1,4,1,0,bias=False),nn.Sigmoid())
+        else:
+          self.encode1 = SpectralNorm(nn.Conv2d(nc, ndf, 4, 2, 1, bias=False))
+          # state size. (ndf) x 32 x 32
+          self.encode2 = SpectralNorm(nn.Conv2d(ndf, ndf * 2,4, 2, 1,bias=False))
+          # state size. (ndf*2) x 16 x 16
+          self.encode3 = SpectralNorm(nn.Conv2d(ndf * 2, ndf * 4, 2, 1,bias=False))
+          # state size. (ndf*4) x 8 x 8
+          self.encode4 = SpectralNorm(nn.Conv2d(ndf * 4, ndf * 8, 2, 1,bias=False))
+          # state size. (ndf*8) x 4x 4
+          self.encode5 =SpectralNorm(nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False), nn.Sigmoid())
+
 
     def forward(self,input):
-        feature_1 = self.encode1(input)
-        feature_2 = self.encode2(feature_1)
-        feature_3 = self.encode3(feature_2)
-        feature_4 = self.encode4(feature_3)
-        feature_5 = self.encode5(feature_4)
+          feature_1 = self.encode1(input)
+          feature_2 = self.encode2(feature_1)
+          feature_3 = self.encode3(feature_2)
+          feature_4 = self.encode4(feature_3)
+          feature_5 = self.encode5(feature_4)
+          return feature_5
+
 
 
     def _make_layer_encode(self,in_nc,out_nc,stride_nm,Padd_nm):
@@ -155,6 +173,98 @@ NetD.apply(Weight_init)
 
     # Print the model
 print(NetD)
+
+#-------------Define loss funtion
+criterion = nn.BCELoss()
+# Create a batch of noise
+
+fixed_noise = torch.randn(64, nz, 1, 1, device=device)
+
+lable_re = 1
+lable_fa = 0
+
+Optimizer_D = optim.Adam(NetD.parameters(),lr=lr, betas=(beta1, 0.999))
+Optimizer_G = optim.Adam(NetG.parameters(),lr=lr, betas=(beta1, 0.999))
+
+# Training Procedure ---------------
+G_loss = []
+D_Loss = []
+img_G_list = []
+iters = 0
+#-------------
+print("Starting Training.........")
+# For each epoch
+for epoch in range(num_epochs):
+   # For each batch in dalaloader
+    for i,data in enumerate(DataLoader,0):
+        # Update Discriminator
+        # Train Discriminator with Real batches
+        NetD.zero_grad()
+        Real_data_cpu = data[0].to(device)
+        batch_size = Real_data_cpu.size(0)
+        label = torch.full((batch_size),lable_re,device=device)
+        output_D = NetD(Real_data_cpu).view(-1)
+        #Calculate loss for real data batch
+        Err_real_D = criterion(output_D,label)
+        #computes dErr_real_D/dx for every parameter x
+        Err_real_D.backward()
+        # Average loss
+        D_x = output_D.mean().item()
+        # Train discriminator for fake batches
+        noise = torch.randn(batch_size,nz,1,1,device=device)
+        # Generate fake image using generator
+        fake_img = NetG(noise)
+        label.fill_(lable_fa)
+        output_D = NetD(fake_img.detach()).view(-1)
+        Err_fake_D = criterion(output_D,label)
+        Err_fake_D.backward()
+        D_G_z1 = output_D.mean().item()
+        ErrD = Err_fake_D+Err_real_D
+        # Update D
+        Optimizer_D.step()
+        # Update Generator
+        NetG.zero_grad()
+        label.fill_(lable_re)
+        output_D_G = NetD(fake_img).view(-1)
+        # Claculate Generator loss
+        ErrG = criterion(output_D_G,label)
+        ErrG.backward()
+        D_G_z2 = output_D_G.mean().item()
+        Optimizer_G.step()
+        #-----------output status--------------
+        if i%5==0:
+            print('\Epoc:%d\Num_epoc:%d\Err_D:%.4f\Err_G:%.4f'),(epoch,num_epochs,ErrG.item(),ErrD.item())
+        G_loss.append(ErrG.item())
+        D_Loss.append((ErrD.item()))
+        # Check how the generator is doing by saving G's output on fixed_noise
+        if (iters % 500 == 0) or ((epoch == num_epochs - 1) and (i == len(dataloader) - 1)):
+            with torch.no_grad():
+                fake = NetG(fixed_noise).detach().cpu()
+            img_G_list.append(vutils.make_grid(fake, padding=2, normalize=True))
+
+        iters += 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
