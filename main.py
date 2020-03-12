@@ -41,7 +41,8 @@ lr = 0.0002
 beta1 = 0.5
 # Number of GPU
 ngpu = 0
-
+leak=0.1
+Normalize_pm ='Spectral'
 #------------------------
 # Weight initialization
 def Weight_init(W):
@@ -126,11 +127,12 @@ print(NetG)
 class Discriminator(nn.Module):
     def __init__(self,ngpu,Norm_pm):
         super(Discriminator,self).__init__()
-        self.Norm_pm = Norm_pm
+        self.Normalize_pm = Norm_pm
         self.ngpu = ngpu
         # input is (nc) x 64 x 64
         if Norm_pm =='BatchNorm':
-          self.encode1 = nn.Sequential(nn.Conv2d(nc,ndf,4,2,1,bias=False),nn.LeakyReLU(0.2,inplace=True))
+          self.encode1 = nn.Sequential(nn.Conv2d(nc,ndf,4,2,1,bias=False),
+                                       nn.LeakyReLU(0.2,inplace=True))
           # state size. (ndf) x 32 x 32
           self.encode2 = self._make_layer_encode(ndf,ndf*2,2,1)
           # state size. (ndf*2) x 16 x 16
@@ -144,20 +146,27 @@ class Discriminator(nn.Module):
           # state size. (ndf) x 32 x 32
           self.encode2 = SpectralNorm(nn.Conv2d(ndf, ndf * 2,4, 2, 1,bias=False))
           # state size. (ndf*2) x 16 x 16
-          self.encode3 = SpectralNorm(nn.Conv2d(ndf * 2, ndf * 4, 2, 1,bias=False))
+          self.encode3 = SpectralNorm(nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1,bias=False))
           # state size. (ndf*4) x 8 x 8
-          self.encode4 = SpectralNorm(nn.Conv2d(ndf * 4, ndf * 8, 2, 1,bias=False))
+          self.encode4 = SpectralNorm(nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1,bias=False))
           # state size. (ndf*8) x 4x 4
-          self.encode5 =SpectralNorm(nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False), nn.Sigmoid())
+          self.encode5 = nn.Sequential(nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False), nn.Sigmoid())
 
-
+# addddd Relue..........................................................
     def forward(self,input):
+        if self.Normalize_pm =='BatchNorm':
           feature_1 = self.encode1(input)
           feature_2 = self.encode2(feature_1)
           feature_3 = self.encode3(feature_2)
           feature_4 = self.encode4(feature_3)
           feature_5 = self.encode5(feature_4)
-          return feature_5
+        else:
+            feature_1 = nn.LeakyReLU(leak)(self.encode1(input))
+            feature_2 = nn.LeakyReLU(leak)(self.encode2(feature_1))
+            feature_3 = nn.LeakyReLU(leak)(self.encode3(feature_2))
+            feature_4 = nn.LeakyReLU(leak)(self.encode4(feature_3))
+            feature_5 = self.encode5(feature_4)
+        return feature_5
 
 
 
@@ -167,14 +176,18 @@ class Discriminator(nn.Module):
                 nn.LeakyReLU(True)]
         return nn.Sequential(*block)
 
-NetD = Discriminator(ngpu,'BatchNorm').to(device)
+NetD = Discriminator(ngpu,Normalize_pm).to(device)
 if (device.type=='cuda') and (ngpu>0):
     NetD = nn.DataParallel(NetD,list(range(ngpu)))
-
-NetD.apply(Weight_init)
-
-    # Print the model
+# Print the model
 print(NetD)
+if Normalize_pm == 'BatchNorm':
+
+   NetD.apply(Weight_init)
+   Optimizer_D = optim.Adam(NetD.parameters(), lr=lr, betas=(beta1, 0.999))
+
+else:
+    Optimizer_D = optim.Adam(filter(lambda p: p.requires_grad, NetD.parameters()), lr=lr, betas=(beta1, 0.999))
 
 #-------------Define loss funtion
 criterion = nn.BCELoss()
@@ -185,7 +198,6 @@ fixed_noise = torch.randn(4, nz, 1, 1, device=device)
 lable_re = 1
 lable_fa = 0
 
-Optimizer_D = optim.Adam(NetD.parameters(),lr=lr, betas=(beta1, 0.999))
 Optimizer_G = optim.Adam(NetG.parameters(),lr=lr, betas=(beta1, 0.999))
 
 # Training Procedure ---------------
